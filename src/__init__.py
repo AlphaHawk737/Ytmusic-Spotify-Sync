@@ -1,0 +1,1 @@
+"""Playlist synchronization tool for Spotify and YouTube Music."""
