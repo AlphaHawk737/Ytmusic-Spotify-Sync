@@ -34,3 +34,9 @@ htmlcov/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+
+
+#JSON files
+Google_API_IDS.json
+youtube_auth.json
+spotify_auth.json
