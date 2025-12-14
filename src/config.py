@@ -24,8 +24,8 @@ class Config:
     SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
     SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8888/callback")
     
-    # YouTube Music Configuration
-    YOUTUBE_MUSIC_HEADERS_FILE = os.getenv("YOUTUBE_MUSIC_HEADERS_FILE", "youtube_headers_auth.json")
+    # YouTube Music Configuration (Browser Headers)
+    YOUTUBE_AUTH_FILE = os.getenv("YOUTUBE_AUTH_FILE", "youtube_auth.json")
     
     # Application Settings
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -51,11 +51,11 @@ class Config:
             )
     
     @classmethod
-    def get_youtube_headers_path(cls):
+    def get_youtube_auth_path(cls):
         """
-        Returns the full path to the YouTube Music headers file.
+        Returns the full path to the YouTube Music authentication headers file.
         """
-        return PROJECT_ROOT / cls.YOUTUBE_MUSIC_HEADERS_FILE
+        return PROJECT_ROOT / cls.YOUTUBE_AUTH_FILE
 
 
 # Convenience function to get config instance
