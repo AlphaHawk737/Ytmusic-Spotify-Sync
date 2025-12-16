@@ -20,7 +20,7 @@ class Config:
     # Spotify Configuration
     SPOTIFY_CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID')
     SPOTIFY_CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
-    SPOTIFY_REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'http://localhost:8888/callback')
+    SPOTIFY_REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'http://127.0.0.1:8888/callback')
     
     # YouTube Music Configuration (we'll add this later in Phase 3-Step 6)
     YOUTUBE_HEADERS_FILE = os.getenv('YOUTUBE_HEADERS_FILE', 'youtube_headers.json')

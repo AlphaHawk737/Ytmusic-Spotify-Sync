@@ -40,3 +40,7 @@ htmlcov/
 Google_API_IDS.json
 youtube_auth.json
 spotify_auth.json
+
+
+# Spotify cache file (contains access tokens)
+.spotify_cache
