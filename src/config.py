@@ -23,7 +23,7 @@ class Config:
     SPOTIFY_REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'http://127.0.0.1:8888/callback')
     
     # YouTube Music Configuration (we'll add this later in Phase 3-Step 6)
-    YOUTUBE_HEADERS_FILE = os.getenv('YOUTUBE_HEADERS_FILE', 'youtube_headers.json')
+    YOUTUBE_HEADERS_FILE = os.getenv('YOUTUBE_HEADERS_FILE', 'youtube_auth.json')
     
     # Application Settings
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
