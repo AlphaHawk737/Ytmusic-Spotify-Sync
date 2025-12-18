@@ -46,6 +46,7 @@ ytmusic_oauth.json
 oauth.json
 ytmusic_headers.json
 headers_auth.json
+*.json
 
 # Spotify cache file (contains access tokens)
 .spotify_cache
