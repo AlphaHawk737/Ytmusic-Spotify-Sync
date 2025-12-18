@@ -41,7 +41,15 @@ Google_API_IDS.json
 youtube_auth.json
 spotify_auth.json
 Youtube_Oauth.json
-
+youtube_client_secret.json
+ytmusic_oauth.json
+oauth.json
+ytmusic_headers.json
+headers_auth.json
 
 # Spotify cache file (contains access tokens)
 .spotify_cache
+
+
+# Youtube cache file (contains access tokens)
+youtube_token.pickle
