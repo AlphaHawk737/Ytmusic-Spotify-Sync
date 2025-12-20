@@ -288,3 +288,31 @@ def match_song(
     matcher = SongMatcher(min_confidence=min_confidence)
     source_song = {"title": source_title, "artist": source_artist}
     return matcher.find_best_match(source_song, candidates)
+
+
+def find_best_match(
+    source_title: str,
+    source_artist: str,
+    target_title: str,
+    target_artist: str
+) -> float:
+    """
+    Calculate confidence score for a match between two songs.
+    
+    Args:
+        source_title: Title of source song
+        source_artist: Artist of source song
+        target_title: Title of target song
+        target_artist: Artist of target song
+    
+    Returns:
+        Confidence score as a float between 0.0 and 1.0
+    """
+    matcher = SongMatcher()
+    # Calculate similarity (returns 0-100)
+    similarity = matcher.calculate_similarity(
+        source_title, source_artist,
+        target_title, target_artist
+    )
+    # Convert to 0.0-1.0 range
+    return similarity / 100.0

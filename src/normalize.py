@@ -322,12 +322,57 @@ def normalize_song_simple(title: str, artist: str) -> Dict[str, str]:
     Args:
         title: Song title
         artist: Artist name
-        
+    
     Returns:
         Dictionary with normalized 'title' and 'artist'
     """
     normalizer = SongNormalizer()
     return normalizer.normalize_song(title, artist)
+
+
+def normalize_track_name(track_name: str) -> str:
+    """
+    Normalize a track name for matching.
+    
+    Args:
+        track_name: Original track name
+    
+    Returns:
+        Normalized track name string
+    """
+    if not track_name:
+        return ""
+    try:
+        normalizer = SongNormalizer()
+        # Remove video suffixes, normalize featuring, then normalize text
+        cleaned = normalizer.remove_video_suffixes(track_name)
+        cleaned = normalizer.normalize_featuring(cleaned)
+        return normalizer.normalize_text(cleaned)
+    except Exception:
+        # Fallback to simple lowercase if normalization fails
+        return track_name.lower().strip()
+
+
+def normalize_artist_name(artist_name: str) -> str:
+    """
+    Normalize an artist name for matching.
+    
+    Args:
+        artist_name: Original artist name(s)
+    
+    Returns:
+        Normalized artist name string
+    """
+    if not artist_name:
+        return ""
+    try:
+        normalizer = SongNormalizer()
+        # Normalize featuring notation, then normalize text
+        cleaned = normalizer.normalize_featuring(artist_name)
+        return normalizer.normalize_text(cleaned)
+    except Exception:
+        # Fallback to simple lowercase if normalization fails
+        return artist_name.lower().strip()
 
 
 # Example usage and testing

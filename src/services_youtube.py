@@ -1,5 +1,6 @@
 from ytmusicapi import YTMusic
 import os
+import time
 
 class YouTubeMusicService:
     def __init__(self, headers_file='headers_auth.json'):
@@ -120,7 +121,8 @@ class YouTubeMusicService:
             
             if results:
                 top_result = results[0]
-                print(f"✅ Found: {top_result['title']} - {top_result['artists'][0]['name']}")
+                # Don't print for every search (too verbose during sync)
+                # print(f"✅ Found: {top_result['title']} - {top_result['artists'][0]['name']}")
                 return {
                     'title': top_result.get('title', ''),
                     'artists': ', '.join([artist['name'] for artist in top_result.get('artists', [])]),
@@ -129,7 +131,7 @@ class YouTubeMusicService:
                     'videoId': top_result.get('videoId', '')
                 }
             else:
-                print(f"❌ No results found for: {query}")
+                # print(f"❌ No results found for: {query}")
                 return None
         except Exception as e:
             print(f"❌ Error searching song: {e}")
@@ -148,18 +150,124 @@ class YouTubeMusicService:
             print(f"❌ Error creating playlist: {e}")
             return None
     
-    def add_songs_to_playlist(self, playlist_id, video_ids):
-        """Add songs to a playlist"""
-        if not self._check_auth_and_handle_expiry():
-            return None
+    def add_songs_to_playlist(self, playlist_id, video_ids, max_retries=2):
+        """
+        Add songs to a playlist with better error handling
         
+        Args:
+            playlist_id: YouTube Music playlist ID
+            video_ids: List of video IDs to add
+            max_retries: Number of times to retry on failure
+            
+        Returns:
+            Dict with success status and details
+        """
+        if not self._check_auth_and_handle_expiry():
+            return {'success': False, 'added': 0, 'error': 'Authentication failed'}
+        
+        # Validate inputs
+        if not playlist_id:
+            print("❌ Invalid playlist_id")
+            return {'success': False, 'added': 0, 'error': 'Invalid playlist_id'}
+        
+        if not video_ids or len(video_ids) == 0:
+            print("⚠️  No video IDs to add")
+            return {'success': True, 'added': 0, 'error': None}
+        
+        # Filter out invalid video IDs
+        valid_video_ids = [vid for vid in video_ids if vid and len(vid) >= 5]
+        
+        if len(valid_video_ids) < len(video_ids):
+            invalid_count = len(video_ids) - len(valid_video_ids)
+            print(f"⚠️  Filtered out {invalid_count} invalid video IDs")
+        
+        if not valid_video_ids:
+            print("❌ No valid video IDs to add")
+            return {'success': False, 'added': 0, 'error': 'No valid video IDs'}
+        
+        # Get current playlist size before adding
         try:
-            result = self.ytmusic.add_playlist_items(playlist_id, video_ids)
-            print(f"✅ Added {len(video_ids)} songs to playlist")
-            return result
-        except Exception as e:
-            print(f"❌ Error adding songs to playlist: {e}")
-            return None
+            before_playlist = self.ytmusic.get_playlist(playlist_id, limit=1)
+            tracks_before = before_playlist.get('trackCount', 0)
+        except:
+            tracks_before = None
+        
+        # Try to add songs
+        for attempt in range(max_retries):
+            try:
+                print(f"  🔄 Attempting to add {len(valid_video_ids)} songs (attempt {attempt + 1}/{max_retries})...")
+                
+                result = self.ytmusic.add_playlist_items(playlist_id, valid_video_ids)
+                
+                # If no exception was raised, assume success
+                # YouTube Music API is reliable but slow to update metadata
+                print(f"  ✅ API call successful - {len(valid_video_ids)} songs sent to playlist")
+                return {
+                    'success': True, 
+                    'added': len(valid_video_ids), 
+                    'error': None
+                }
+                    
+            except Exception as e:
+                error_msg = str(e)
+                print(f"  ❌ Error on attempt {attempt + 1}: {error_msg}")
+                
+                # Check for specific errors
+                if '400' in error_msg or 'Bad Request' in error_msg:
+                    print(f"  ⚠️  Bad Request - Some video IDs may be invalid")
+                    # Try adding songs one by one to find bad ones
+                    if len(valid_video_ids) > 1 and attempt == max_retries - 1:
+                        print(f"  🔄 Attempting to add songs individually...")
+                        return self._add_songs_individually(playlist_id, valid_video_ids)
+                
+                if attempt < max_retries - 1:
+                    print(f"  🔄 Retrying in 2 seconds...")
+                    time.sleep(2)
+                else:
+                    return {'success': False, 'added': 0, 'error': error_msg}
+        
+        return {'success': False, 'added': 0, 'error': 'Max retries exceeded'}
+    
+    def _add_songs_individually(self, playlist_id, video_ids):
+        """
+        Add songs one by one to identify which ones are causing issues
+        
+        Args:
+            playlist_id: YouTube Music playlist ID
+            video_ids: List of video IDs to add
+            
+        Returns:
+            Dict with success status and details
+        """
+        print(f"  📝 Adding {len(video_ids)} songs individually to identify issues...")
+        
+        added_count = 0
+        failed_ids = []
+        
+        for idx, video_id in enumerate(video_ids, 1):
+            try:
+                print(f"    [{idx}/{len(video_ids)}] Adding {video_id}...", end=' ')
+                self.ytmusic.add_playlist_items(playlist_id, [video_id])
+                print("✅")
+                added_count += 1
+                
+                # Small delay to avoid rate limiting
+                if idx % 5 == 0:
+                    time.sleep(0.5)
+                    
+            except Exception as e:
+                print(f"❌ ({str(e)[:50]})")
+                failed_ids.append(video_id)
+        
+        if failed_ids:
+            print(f"  ⚠️  {len(failed_ids)} songs failed to add: {failed_ids[:5]}...")
+        
+        return {
+            'success': added_count > 0,
+            'added': added_count,
+            'error': f'{len(failed_ids)} songs failed' if failed_ids else None,
+            'failed_ids': failed_ids
+        }
 
 
 # Test the service
@@ -186,6 +294,7 @@ if __name__ == "__main__":
         print("\n[3/3] Testing song search (Bohemian Rhapsody by Queen)...")
         result = ytm.search_song("Bohemian Rhapsody", "Queen")
         if result:
+            print(f"  ✅ Found: {result['title']}")
             print(f"  Album: {result['album']}")
             print(f"  Duration: {result['duration']}")
             print(f"  Video ID: {result['videoId']}")
