@@ -54,3 +54,15 @@ headers_auth.json
 
 # Youtube cache file (contains access tokens)
 youtube_token.pickle
+
+# Log files
+*.log
+*.log.*
+*.log.*.*
+*.log.*.*.*
+*.log.*.*.*.*
+*.log.*.*.*.*.*
+*.log.*.*.*.*.*.*
+*.log.*.*.*.*.*.*.*
+*.log.*.*.*.*.*.*.*.*
+*.log.*.*.*.*.*.*.*.*.*

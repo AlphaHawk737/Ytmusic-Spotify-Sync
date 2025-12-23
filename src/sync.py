@@ -1,372 +1,316 @@
-"""
-Sync Engine - Simple One-Way Sync (Spotify → YouTube Music)
-Phase 5, Step 9 - Simplest Case Implementation
-"""
-
+# src/sync.py
 import logging
 import time
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
+import sys
+import re
+import os
+import difflib
+from datetime import datetime
+from typing import List, Dict, Any
 
-# Import your services (adjust paths if needed)
 from src.services_spotify import SpotifyService
 from src.services_youtube import YouTubeMusicService
-from src.normalize import normalize_track_name, normalize_artist_name
-from src.matching import find_best_match
+from src.config import Config
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+class SyncLogger:
+    """
+    Handles dual-logging: 
+    1. Concise, visual output for Terminal.
+    2. Detailed, formal, technical output for Log Files.
+    """
+    def __init__(self, enable_file_logging=False):
+        self.file_logger = None
+        if enable_file_logging:
+            if not os.path.exists('logs'):
+                os.makedirs('logs')
+            filename = f"logs/sync_session_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+            
+            # Setup File Logger
+            self.file_logger = logging.getLogger('file_logger')
+            self.file_logger.setLevel(logging.DEBUG)
+            handler = logging.FileHandler(filename, encoding='utf-8')
+            formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+            handler.setFormatter(formatter)
+            self.file_logger.addHandler(handler)
+            print(f"📄 Detailed log file created at: {filename}")
 
+    def log_terminal(self, msg: str):
+        """Print to console only"""
+        print(msg)
 
-@dataclass
-class SyncResult:
-    """Results of a sync operation"""
-    playlist_name: str
-    total_tracks: int
-    matched_tracks: int
-    failed_tracks: int
-    failed_songs: List[Dict]
-    duration_seconds: float
-    success: bool
+    def log_file(self, msg: str, level='INFO'):
+        """Write to file only (Formal tone)"""
+        if self.file_logger:
+            if level == 'INFO': self.file_logger.info(msg)
+            elif level == 'ERROR': self.file_logger.error(msg)
+            elif level == 'WARNING': self.file_logger.warning(msg)
+            elif level == 'DEBUG': self.file_logger.debug(msg)
 
+    def log_both(self, terminal_msg: str, file_msg: str = None, level='INFO'):
+        """Log distinct messages to both destinations"""
+        print(terminal_msg)
+        if self.file_logger:
+            # Use file_msg if provided, else strip emojis from terminal_msg for file
+            clean_msg = file_msg if file_msg else self._clean_emojis(terminal_msg)
+            if level == 'INFO': self.file_logger.info(clean_msg)
+            elif level == 'ERROR': self.file_logger.error(clean_msg)
 
-class SimpleSyncEngine:
-    """Simple sync engine - Spotify to YouTube Music, additions only"""
-    
-    def __init__(self, spotify_service: SpotifyService, youtube_service: YouTubeMusicService):
+    def _clean_emojis(self, text):
+        return text.encode('ascii', 'ignore').decode('ascii').strip()
+
+class SyncEngine:
+    def __init__(self, logger: SyncLogger):
+        self.logger = logger
+        self.config = Config()
+        self.spotify = SpotifyService(
+            client_id=self.config.SPOTIFY_CLIENT_ID,
+            client_secret=self.config.SPOTIFY_CLIENT_SECRET,
+            redirect_uri=self.config.SPOTIFY_REDIRECT_URI
+        )
+        yt_header_file = getattr(self.config, 'YOUTUBE_HEADERS_FILE', 'youtube_auth.json')
+        self.youtube = YouTubeMusicService(headers_file=yt_header_file)
+        
+        # State tracking for summary
+        self.unmatched_songs = []
+        self.failed_to_add_songs = []
+
+    def clean_text(self, text):
+        if not text: return ""
+        text = text.lower()
+        # Remove (...) and [...]
+        text = re.sub(r'[\(\[].*?[\)\]]', '', text) 
+        # Remove specific filler words
+        text = text.replace("feat.", "").replace("ft.", "").replace("remastered", "").replace("remaster", "")
+        # Remove non-alphanumeric
+        return re.sub(r'[^a-z0-9\s]', '', text).strip()
+
+    def calculate_score(self, s_title, s_artist, t_title, t_artist):
         """
-        Initialize sync engine
-        
-        Args:
-            spotify_service: Authenticated SpotifyService instance
-            youtube_service: Authenticated YouTubeMusicService instance
+        Calculates a precise match score (0-100).
         """
-        self.spotify = spotify_service
-        self.youtube = youtube_service
-        self.logger = logging.getLogger(__name__)
-    
-    def sync_playlist_spotify_to_youtube(
-        self, 
-        spotify_playlist_id: str,
-        youtube_playlist_id: Optional[str] = None,
-        create_if_missing: bool = True
-    ) -> SyncResult:
-        """
-        Sync a single Spotify playlist to YouTube Music (additions only)
+        clean_s = self.clean_text(f"{s_title} {s_artist}")
+        clean_t = self.clean_text(f"{t_title} {t_artist}")
         
-        Args:
-            spotify_playlist_id: ID of Spotify playlist to sync from
-            youtube_playlist_id: ID of YouTube Music playlist to sync to (None = create new)
-            create_if_missing: If True, create YouTube playlist if youtube_playlist_id is None
+        # 1. Exact Match
+        if clean_s == clean_t:
+            return 100.0
             
-        Returns:
-            SyncResult with operation details
-        """
-        start_time = time.time()
+        # 2. Sequence Matcher (Levenshtein ratio)
+        ratio = difflib.SequenceMatcher(None, clean_s, clean_t).ratio()
+        score = ratio * 100
         
-        try:
-            # Step 1: Fetch source playlist info and tracks
-            self.logger.info("=" * 60)
-            self.logger.info("Starting Spotify → YouTube Music Sync")
-            self.logger.info("=" * 60)
+        # 3. Penalize if length difference is huge (prevents "Love" matching "Love Story" too highly)
+        len_diff = abs(len(clean_s) - len(clean_t))
+        if len_diff > 10 and score > 80:
+            score -= 10
             
-            spotify_playlists = self.spotify.get_user_playlists()
-            playlist_name = next(
-                (pl['name'] for pl in spotify_playlists if pl['id'] == spotify_playlist_id),
-                "Unknown Playlist"
-            )
-            
-            self.logger.info(f"📋 Source Playlist: {playlist_name}")
-            self.logger.info(f"🔍 Fetching tracks from Spotify...")
-            
-            source_tracks = self.spotify.get_playlist_tracks(spotify_playlist_id)
-            
-            if not source_tracks:
-                self.logger.warning("⚠️  No tracks found in source playlist")
-                return SyncResult(
-                    playlist_name=playlist_name,
-                    total_tracks=0,
-                    matched_tracks=0,
-                    failed_tracks=0,
-                    failed_songs=[],
-                    duration_seconds=time.time() - start_time,
-                    success=True
-                )
-            
-            self.logger.info(f"✅ Found {len(source_tracks)} tracks in Spotify playlist")
-            
-            # Step 2: Create or get YouTube Music playlist
-            if youtube_playlist_id is None:
-                if create_if_missing:
-                    self.logger.info(f"🆕 Creating new YouTube Music playlist: {playlist_name}")
-                    youtube_playlist_id = self.youtube.create_playlist(
-                        name=f"{playlist_name} (from Spotify)",
-                        description=f"Synced from Spotify playlist '{playlist_name}'"
-                    )
-                    
-                    if not youtube_playlist_id:
-                        raise Exception("Failed to create YouTube Music playlist")
-                else:
-                    raise ValueError("youtube_playlist_id is required when create_if_missing=False")
-            
-            self.logger.info(f"🎵 Target YouTube Music Playlist ID: {youtube_playlist_id}")
-            
-            # Step 3: Get existing tracks in YouTube playlist (to avoid duplicates)
-            self.logger.info("🔍 Checking existing tracks in YouTube Music playlist...")
-            existing_youtube_tracks = self.youtube.get_playlist_tracks(youtube_playlist_id)
-            existing_track_ids = {track['videoId'] for track in existing_youtube_tracks if track.get('videoId')}
-            
-            self.logger.info(f"📊 YouTube playlist currently has {len(existing_youtube_tracks)} tracks")
-            
-            # Step 4: Match and add tracks
-            matched_video_ids = []
-            failed_songs = []
-            
-            self.logger.info("\n" + "=" * 60)
-            self.logger.info("Starting Track Matching Process")
-            self.logger.info("=" * 60)
-            
-            for idx, track in enumerate(source_tracks, 1):
-                track_name = track['name']
-                artists = ', '.join(track['artists']) if isinstance(track['artists'], list) else track['artists']
-                
-                self.logger.info(f"\n[{idx}/{len(source_tracks)}] Processing: {track_name} - {artists}")
-                
-                # Normalize track info for better matching
-                normalized_track = normalize_track_name(track_name)
-                normalized_artist = normalize_artist_name(artists)
-                
-                # Search on YouTube Music
-                self.logger.info(f"  🔍 Searching YouTube Music...")
-                youtube_result = self.youtube.search_song(normalized_track, normalized_artist)
-                
-                if youtube_result and youtube_result.get('videoId'):
-                    video_id = youtube_result['videoId']
-                    
-                    # Validate video ID format
-                    if not video_id or len(video_id) < 5:
-                        self.logger.warning(f"  ⚠️  Invalid video ID: {video_id}")
-                        failed_songs.append({
-                            'track': track_name,
-                            'artist': artists,
-                            'reason': f'Invalid video ID: {video_id}'
-                        })
-                        continue
-                    
-                    # Check if already in playlist
-                    if video_id in existing_track_ids:
-                        self.logger.info(f"  ⏭️  Already in playlist, skipping")
-                        continue
-                    
-                    # Use fuzzy matching to verify it's a good match
-                    match_confidence = find_best_match(
-                        track_name, 
-                        artists,
-                        youtube_result['title'],
-                        youtube_result['artists']
-                    )
-                    
-                    if match_confidence >= 0.80:  # 80% confidence threshold
-                        matched_video_ids.append(video_id)
-                        self.logger.info(f"  ✅ Matched! Confidence: {match_confidence:.1%}")
-                        self.logger.info(f"     YouTube: {youtube_result['title']} - {youtube_result['artists']}")
-                        self.logger.info(f"     Video ID: {video_id}")
-                    elif match_confidence >= 0.70:  # Between 70-80% - possible match
-                        self.logger.warning(f"  ⚠️  Possible match ({match_confidence:.1%})")
-                        self.logger.warning(f"     Spotify: {track_name} - {artists}")
-                        self.logger.warning(f"     YouTube: {youtube_result['title']} - {youtube_result['artists']}")
-                        self.logger.warning(f"     Video ID: {video_id}")
-                        
-                        # Auto-add if confidence is 75% or higher
-                        if match_confidence >= 0.75:
-                            self.logger.info(f"  ➕ Auto-adding (75%+ confidence)")
-                            matched_video_ids.append(video_id)
-                        else:
-                            failed_songs.append({
-                                'track': track_name,
-                                'artist': artists,
-                                'reason': f'Low match confidence: {match_confidence:.1%} (YouTube: {youtube_result["title"]})'
-                            })
-                    else:
-                        self.logger.warning(f"  ⚠️  Low confidence match ({match_confidence:.1%}), skipping")
-                        failed_songs.append({
-                            'track': track_name,
-                            'artist': artists,
-                            'reason': f'Low match confidence: {match_confidence:.1%}'
-                        })
-                else:
-                    self.logger.warning(f"  ❌ No match found on YouTube Music")
-                    failed_songs.append({
-                        'track': track_name,
-                        'artist': artists,
-                        'reason': 'Not found on YouTube Music'
-                    })
-            
-            # Step 5: Add matched tracks to YouTube Music playlist
-            self.logger.info("\n" + "=" * 60)
-            self.logger.info("Adding Tracks to YouTube Music Playlist")
-            self.logger.info("=" * 60)
-            
-            if matched_video_ids:
-                self.logger.info(f"📤 Adding {len(matched_video_ids)} tracks to YouTube Music...")
-                
-                # Add in smaller batches with error handling
-                batch_size = 10  # Reduced from 50 to avoid rate limits
-                successfully_added = 0
-                
-                for i in range(0, len(matched_video_ids), batch_size):
-                    batch = matched_video_ids[i:i + batch_size]
-                    batch_num = i//batch_size + 1
-                    
-                    self.logger.info(f"  📦 Processing batch {batch_num} ({len(batch)} tracks)...")
-                    
-                    try:
-                        result = self.youtube.add_songs_to_playlist(youtube_playlist_id, batch)
-                        
-                        if result and isinstance(result, dict):
-                            if result['success']:
-                                added = result['added']
-                                successfully_added += added
-                                self.logger.info(f"  ✅ Batch {batch_num}: {added}/{len(batch)} songs added")
-                                if result.get('error'):
-                                    self.logger.warning(f"     ⚠️  {result['error']}")
-                            else:
-                                self.logger.error(f"  ❌ Batch {batch_num} failed: {result.get('error', 'Unknown error')}")
-                        else:
-                            self.logger.error(f"  ❌ Batch {batch_num} failed (API returned invalid response)")
-                        
-                        # Add delay between batches to avoid rate limiting
-                        if i + batch_size < len(matched_video_ids):
-                            time.sleep(1)  # 1 second delay between batches
-                            
-                    except Exception as e:
-                        self.logger.error(f"  ❌ Batch {batch_num} failed with error: {e}")
-                        # Continue with next batch even if one fails
-                
-                self.logger.info(f"\n📊 Addition Summary:")
-                self.logger.info(f"  • Attempted: {len(matched_video_ids)} tracks")
-                self.logger.info(f"  • Successfully added: {successfully_added} tracks")
-                
-                if successfully_added < len(matched_video_ids):
-                    self.logger.warning(f"  ⚠️  {len(matched_video_ids) - successfully_added} tracks failed to add")
-            else:
-                self.logger.warning("⚠️  No new tracks to add")
-            
-            # Step 6: Summary
-            duration = time.time() - start_time
-            
-            self.logger.info("\n" + "=" * 60)
-            self.logger.info("Sync Complete - Summary")
-            self.logger.info("=" * 60)
-            self.logger.info(f"📋 Playlist: {playlist_name}")
-            self.logger.info(f"📊 Total tracks processed: {len(source_tracks)}")
-            self.logger.info(f"✅ Successfully matched: {len(matched_video_ids)}")
-            self.logger.info(f"❌ Failed to match: {len(failed_songs)}")
-            self.logger.info(f"⏱️  Duration: {duration:.2f} seconds")
-            
-            if failed_songs:
-                self.logger.info("\n❌ Failed Songs:")
-                for song in failed_songs[:10]:  # Show first 10
-                    self.logger.info(f"  • {song['track']} - {song['artist']}")
-                    self.logger.info(f"    Reason: {song['reason']}")
-                if len(failed_songs) > 10:
-                    self.logger.info(f"  ... and {len(failed_songs) - 10} more")
-            
-            return SyncResult(
-                playlist_name=playlist_name,
-                total_tracks=len(source_tracks),
-                matched_tracks=len(matched_video_ids),
-                failed_tracks=len(failed_songs),
-                failed_songs=failed_songs,
-                duration_seconds=duration,
-                success=True
-            )
-            
-        except Exception as e:
-            self.logger.error(f"❌ Sync failed with error: {str(e)}", exc_info=True)
-            return SyncResult(
-                playlist_name="Unknown",
-                total_tracks=0,
-                matched_tracks=0,
-                failed_tracks=0,
-                failed_songs=[],
-                duration_seconds=time.time() - start_time,
-                success=False
-            )
+        return round(score, 2)
 
+    def sync_playlist(self, sp_playlist_id: str, target_yt_id: str = None):
+        # --- 1. SETUP ---
+        self.logger.log_file("=== SESSION START ===")
+        self.logger.log_file(f"Source Spotify Playlist ID: {sp_playlist_id}")
+        
+        self.logger.log_terminal("\n🔍 Fetching Spotify Tracks...")
+        sp_tracks = self.spotify.get_playlist_tracks(sp_playlist_id)
+        
+        if not sp_tracks:
+            self.logger.log_both("❌ No tracks found.", "Error: No tracks found in Spotify playlist.", "ERROR")
+            return
 
-# Example usage / test function
-def test_sync():
-    """Test the sync engine"""
-    from src.config import Config
-    
-    # Load config
-    config = Config()
-    
-    # Initialize services
-    spotify = SpotifyService(
-        client_id=config.SPOTIFY_CLIENT_ID,
-        client_secret=config.SPOTIFY_CLIENT_SECRET,
-        redirect_uri=config.SPOTIFY_REDIRECT_URI
-    )
-    
-    youtube = YouTubeMusicService()
-    
-    # Authenticate
-    print("🔐 Authenticating with Spotify...")
-    if not spotify.authenticate():
-        print("❌ Spotify authentication failed")
-        return
-    
-    print("✅ Spotify authenticated!")
-    
-    # Initialize sync engine
-    sync_engine = SimpleSyncEngine(spotify, youtube)
-    
-    # Get user's Spotify playlists
-    print("\n📋 Fetching your Spotify playlists...")
-    playlists = spotify.get_user_playlists()
-    
-    if not playlists:
-        print("❌ No playlists found")
-        return
-    
-    print(f"\n✅ Found {len(playlists)} playlists:\n")
-    for idx, pl in enumerate(playlists, 1):
-        print(f"{idx}. {pl['name']} ({pl['tracks_total']} tracks)")
-    
-    # Let user choose a playlist
-    choice = input(f"\nEnter playlist number to sync (1-{len(playlists)}): ")
-    
-    try:
-        playlist_idx = int(choice) - 1
-        selected_playlist = playlists[playlist_idx]
-        
-        print(f"\n🎵 You selected: {selected_playlist['name']}")
-        confirm = input("Start sync? (y/n): ")
-        
-        if confirm.lower() == 'y':
-            # Sync the playlist
-            result = sync_engine.sync_playlist_spotify_to_youtube(
-                spotify_playlist_id=selected_playlist['id'],
-                youtube_playlist_id=None,  # Will create new playlist
-                create_if_missing=True
-            )
-            
-            if result.success:
-                print("\n🎉 Sync completed successfully!")
-            else:
-                print("\n❌ Sync failed")
+        sp_playlist_info = self.spotify.sp.playlist(sp_playlist_id)
+        source_name = sp_playlist_info['name']
+        self.logger.log_file(f"Source Playlist Name: {source_name}")
+        self.logger.log_file(f"Total Source Tracks: {len(sp_tracks)}")
+        self.logger.log_terminal(f"✅ Found {len(sp_tracks)} tracks in '{source_name}'.")
+
+        # --- 2. TARGET PLAYLIST ---
+        if not target_yt_id:
+            self.logger.log_terminal(f"\n🔨 Creating NEW YouTube Playlist: '{source_name}'...")
+            target_yt_id = self.youtube.create_playlist(source_name, "Synced by Python Sync Tool")
+            if not target_yt_id:
+                self.logger.log_both("❌ Creation failed.", "CRITICAL: Failed to create YouTube playlist.", "ERROR")
+                return
+            self.logger.log_file(f"Action: Created New Playlist. ID: {target_yt_id}")
         else:
-            print("Sync cancelled")
-            
-    except (ValueError, IndexError):
-        print("❌ Invalid selection")
+            self.logger.log_file(f"Action: Using Existing Playlist. ID: {target_yt_id}")
 
+        # --- 3. MATCHING ---
+        self.logger.log_terminal("\n🔄 Starting Matching Process...")
+        self.logger.log_file("=== MATCHING PHASE ===")
+        
+        matched_videos = [] # List of dicts {videoId, title, original_name}
+        
+        for i, track in enumerate(sp_tracks):
+            sp_name = track['name']
+            sp_artist = track['artists'][0] if track['artists'] else "Unknown"
+            sp_id = track.get('id', 'N/A')
+            
+            log_prefix = f"Track {i+1}/{len(sp_tracks)}: {sp_name} - {sp_artist}"
+            self.logger.log_file(f"Processing {log_prefix} (SpotifyID: {sp_id})")
+            
+            # Search
+            search_query = f"{sp_name} {sp_artist}"
+            self.logger.log_file(f"  > Search Query: '{search_query}'")
+            search_result = self.youtube.search_song(sp_name, sp_artist)
+            
+            if search_result:
+                yt_title = search_result['title']
+                yt_id = search_result['videoId']
+                yt_artists = search_result.get('artists', [])
+                # Normalize artist format
+                yt_artist_str = yt_artists[0].get('name') if isinstance(yt_artists, list) and yt_artists and isinstance(yt_artists[0], dict) else str(yt_artists)
+                
+                score = self.calculate_score(sp_name, sp_artist, yt_title, yt_artist_str)
+                
+                self.logger.log_file(f"  > Top Result: '{yt_title}' by '{yt_artist_str}' (ID: {yt_id})")
+                self.logger.log_file(f"  > Match Score: {score}/100")
+
+                if score >= 60: # Threshold
+                    matched_videos.append({'id': yt_id, 'title': yt_title, 'sp_name': sp_name})
+                    self.logger.log_file("  > Result: MATCH ACCEPTED")
+                    self.logger.log_terminal(f"  ✅ {score:.0f}% | {sp_name[:20]}... -> {yt_title[:20]}...")
+                else:
+                    self.unmatched_songs.append({'name': sp_name, 'artist': sp_artist, 'reason': f"Low Score ({score}%)", 'best_match': yt_title})
+                    self.logger.log_file("  > Result: MATCH REJECTED (Low Score)")
+                    self.logger.log_terminal(f"  ⚠️ {score:.0f}% | {sp_name[:20]}... != {yt_title[:20]}... (Skipped)")
+            else:
+                self.unmatched_songs.append({'name': sp_name, 'artist': sp_artist, 'reason': "No Search Results", 'best_match': "N/A"})
+                self.logger.log_file("  > Result: MATCH FAILED (No results found)")
+                self.logger.log_terminal(f"  ❌ ??? | {sp_name} (Not found)")
+
+            # Rate limit
+            if (i+1) % 10 == 0: time.sleep(0.5)
+
+        # --- 4. BATCHING ---
+        unique_matches = {v['id']: v for v in matched_videos}.values() # Deduplicate by ID
+        unique_ids = [v['id'] for v in unique_matches]
+        
+        self.logger.log_terminal(f"\n🚀 Sending {len(unique_ids)} songs to YouTube...")
+        self.logger.log_file("=== BATCHING PHASE ===")
+        self.logger.log_file(f"Total Unique Matches: {len(unique_ids)}")
+        
+        batch_size = 20
+        total_batches = (len(unique_ids) + batch_size - 1) // batch_size
+        
+        for i in range(0, len(unique_ids), batch_size):
+            batch_ids = unique_ids[i : i + batch_size]
+            batch_num = i//batch_size + 1
+            
+            self.logger.log_file(f"Preparing Batch {batch_num}/{total_batches}")
+            self.logger.log_file(f"  > IDs: {batch_ids}")
+            
+            self.logger.log_terminal(f"  📦 Batch {batch_num}/{total_batches}: Sending {len(batch_ids)} items...")
+            
+            try:
+                response = self.youtube.ytmusic.add_playlist_items(target_yt_id, batch_ids)
+                self.logger.log_file(f"  > API Response: {response}")
+                
+                # Verify Success in response
+                success = False
+                if isinstance(response, dict):
+                    if 'status' in response and response['status'] == 'STATUS_SUCCEEDED':
+                        success = True
+                    elif 'playlistId' in response:
+                        success = True
+                        
+                if success:
+                    self.logger.log_terminal(f"     ✅ Success")
+                else:
+                    self.logger.log_terminal(f"     ⚠️ Check Logs")
+                    # Track failures
+                    for vid in batch_ids:
+                        self.failed_to_add_songs.append({'id': vid, 'reason': f"Batch {batch_num} API Error"})
+                        
+            except Exception as e:
+                self.logger.log_terminal(f"     ❌ Error: {e}")
+                self.logger.log_file(f"  > CRITICAL BATCH ERROR: {e}", "ERROR")
+                for vid in batch_ids:
+                    self.failed_to_add_songs.append({'id': vid, 'reason': f"Exception: {str(e)}"})
+            
+            time.sleep(2)
+
+        # --- 5. VERIFICATION & SUMMARY ---
+        self.logger.log_terminal("\n🏁 Verifying...")
+        time.sleep(2)
+        final_count = 0
+        try:
+            pl = self.youtube.ytmusic.get_playlist(target_yt_id)
+            final_count = int(pl.get('trackCount', len(pl.get('tracks', []))))
+        except Exception as e:
+            self.logger.log_file(f"Verification Failed: {e}", "ERROR")
+
+        # --- LOG FILE SUMMARY SECTIONS ---
+        self.logger.log_file("\n=== UNMATCHED SONGS REPORT ===")
+        if self.unmatched_songs:
+            for s in self.unmatched_songs:
+                self.logger.log_file(f"- {s['name']} by {s['artist']} | Reason: {s['reason']} | Best Found: {s['best_match']}")
+        else:
+            self.logger.log_file("None. All songs matched.")
+
+        self.logger.log_file("\n=== FAILED TO ADD REPORT ===")
+        if self.failed_to_add_songs:
+            for s in self.failed_to_add_songs:
+                self.logger.log_file(f"- VideoID: {s['id']} | Reason: {s['reason']}")
+        else:
+            self.logger.log_file("None. All matched songs were processed successfully.")
+
+        # --- FINAL TERMINAL OUTPUT ---
+        self.logger.log_terminal("\n" + "="*30)
+        self.logger.log_terminal(f"🎉 Sync Complete for '{source_name}'")
+        self.logger.log_terminal(f"📊 Final YouTube Playlist Count: {final_count}")
+        self.logger.log_terminal(f"📉 Unmatched Songs: {len(self.unmatched_songs)}")
+        if self.failed_to_add_songs:
+            self.logger.log_terminal(f"⚠️ Failed to Add: {len(self.failed_to_add_songs)} (Check logs)")
+        self.logger.log_terminal("="*30)
 
 if __name__ == "__main__":
-    test_sync()
+    # --- UI ---
+    print("\n🎵 Spotify -> YouTube Music Sync 🎵")
+    log_choice = input("📝 Generate detailed log file? (y/n): ").lower()
+    enable_logs = log_choice == 'y'
+    
+    # Init
+    logger = SyncLogger(enable_logs)
+    engine = SyncEngine(logger)
+    
+    # Auth
+    if not engine.spotify.authenticate():
+        logger.log_terminal("❌ Spotify Auth Failed")
+        sys.exit(1)
+
+    # Playlist Select
+    playlists = engine.spotify.get_user_playlists()
+    if not playlists:
+        print("No Spotify playlists found.")
+        sys.exit(0)
+        
+    print("\nAvailable Playlists:")
+    for i, p in enumerate(playlists):
+        print(f"{i+1}. {p['name']} ({p['tracks_total']} tracks)")
+        
+    try:
+        p_idx = int(input("\nSelect Playlist #: ")) - 1
+        sp_id = playlists[p_idx]['id']
+    except:
+        print("Invalid.")
+        sys.exit(1)
+
+    # Target Select
+    print("\n1. Create NEW Playlist")
+    print("2. Add to EXISTING Playlist")
+    mode = input("Choice: ")
+    
+    target_id = None
+    if mode == '2':
+        yt_pls = engine.youtube.get_user_playlists()
+        print("\nYouTube Playlists:")
+        for i, p in enumerate(yt_pls):
+             print(f"{i+1}. {p.get('title','?')} ({p.get('count',0)} tracks)")
+        try:
+             y_idx = int(input("Select #: ")) - 1
+             target_id = yt_pls[y_idx]['playlistId']
+        except:
+             sys.exit(1)
+             
+    engine.sync_playlist(sp_id, target_id)
